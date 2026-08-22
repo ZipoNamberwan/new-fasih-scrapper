@@ -19,7 +19,7 @@ TARGET_URL = "https://fasih-sm.bps.go.id/app"
 
 # Global delays & rate limit configuration (in seconds)
 DEFAULT_DELAY = 5  # Delay between iterative requests
-DETAIL_DELAY = 2   # Delay between fetching respondent detail data
+DETAIL_DELAY = 5   # Delay between fetching respondent detail data
 
 # Region configuration
 ENABLE_USER_PROMPT_REGION_LEVEL = True  # Set True to prompt user for target level, False to use maximum region level from metadata
@@ -353,21 +353,85 @@ def prompt_user_select_periods(periods):
 
 
 def prompt_user_select_mode():
-    """Displays action mode prompt for downloading/extracting vs. extract only."""
+    """Displays action mode prompt immediately after credentials."""
     print("\n" + "=" * 60)
     print("                    ACTION MODE                    ")
     print("=" * 60)
-    print("[1] Download details & Extract to Excel (Full Scrape & Extract)")
-    print("[2] Extract to Excel only from existing downloaded JSON files")
+    print("[1] Start a new download (delete existing data.xlsx and json results)")
+    print("[2] Resume download (skip completed regions & existing JSON details)")
+    print("[3] Extract only (generate Excel from existing JSON files without downloading)")
     print("=" * 60)
     while True:
-        choice = input("Select action mode (1 or 2): ").strip()
-        if choice in ("1", "2"):
+        choice = input("Select action mode (1, 2, or 3): ").strip()
+        if choice in ("1", "2", "3"):
             selected_mode = int(choice)
-            mode_desc = "Download & Extract" if selected_mode == 1 else "Extract Only"
-            print(f"\n[+] Selected Mode: [{selected_mode}] {mode_desc}")
+            mode_names = {
+                1: "Start New Download",
+                2: "Resume Download",
+                3: "Extract Only"
+            }
+            print(f"\n[+] Selected Mode: [{selected_mode}] {mode_names[selected_mode]}")
             return selected_mode
-        print("[!] Invalid choice. Please enter 1 or 2.")
+        print("[!] Invalid choice. Please enter 1, 2, or 3.")
+
+
+def get_progress_filepath(survey_id, period_id):
+    """Returns path to the region progress JSON file for a period."""
+    return os.path.join(RESULT_DIR, str(survey_id), str(period_id), "region_progress.json")
+
+
+def load_region_progress(survey_id, period_id):
+    """Loads region completion tracking for a period."""
+    progress_file = get_progress_filepath(survey_id, period_id)
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"completed_regions": []}
+
+
+def save_region_progress(survey_id, period_id, progress):
+    """Saves region completion tracking for a period."""
+    progress_file = get_progress_filepath(survey_id, period_id)
+    os.makedirs(os.path.dirname(progress_file), exist_ok=True)
+    try:
+        with open(progress_file, "w", encoding="utf-8") as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[!] Error saving region progress: {e}")
+
+
+def clear_period_data(survey_id, period_id):
+    """Deletes data.xlsx and json directory for a specific survey period."""
+    import shutil
+    period_dir = os.path.join(RESULT_DIR, str(survey_id), str(period_id))
+    json_dir = os.path.join(period_dir, "json")
+    excel_file = os.path.join(period_dir, OUTPUT_FILENAME)
+    progress_file = get_progress_filepath(survey_id, period_id)
+
+    if os.path.exists(excel_file):
+        try:
+            os.remove(excel_file)
+            print(f"[+] Deleted existing Excel file: {excel_file}")
+        except Exception as e:
+            print(f"[!] Warning: Could not delete {excel_file}: {e}")
+
+    if os.path.exists(json_dir):
+        try:
+            shutil.rmtree(json_dir)
+            print(f"[+] Deleted existing JSON directory: {json_dir}")
+        except Exception as e:
+            print(f"[!] Warning: Could not delete {json_dir}: {e}")
+
+    if os.path.exists(progress_file):
+        try:
+            os.remove(progress_file)
+            print(f"[+] Reset region progress tracking: {progress_file}")
+        except Exception as e:
+            print(f"[!] Warning: Could not delete {progress_file}: {e}")
+
 
 
 def fetch_survey_metadata(driver, survey_id, timeout=30):
@@ -742,6 +806,9 @@ def main():
     password = getpass.getpass("Enter Password                    : ")
     otp = input("Enter OTP (leave blank if none)      : ").strip()
 
+    # Mode option asked right after credential prompt
+    action_mode = prompt_user_select_mode()
+
     driver = get_driver()
     try:
         # Step 1: Open website, perform login flow, submit OTP if provided
@@ -759,11 +826,8 @@ def main():
             periods = fetch_survey_periods(driver, survey_id)
             selected_periods = prompt_user_select_periods(periods)
 
-            # Step 5: Select Action Mode
-            action_mode = prompt_user_select_mode()
-
-            if action_mode == 2:
-                # Mode 2: Extract to Excel only from existing downloaded JSON files
+            if action_mode == 3:
+                # Mode 3: Extract only from existing downloaded JSON files
                 for period in selected_periods:
                     period_id = period.get("id")
                     period_name = period.get("name", "N/A")
@@ -772,18 +836,17 @@ def main():
                     print("=" * 60)
                     extract_json_to_excel(survey_id, period_id)
             else:
-                # Mode 1: Full Download details & Extract Excel
-                # Step 6: Fetch region metadata and prompt target level
+                # Modes 1 & 2: Downloading data
+                # Step 5: Fetch region metadata and prompt target level
                 region_group_id, _ = fetch_survey_metadata(driver, survey_id)
                 if region_group_id:
                     region_metadata = fetch_region_metadata(driver, region_group_id)
                     target_level = prompt_user_select_region_level(region_metadata)
 
-                    # Step 7: Build region hierarchy starting from JAWA TIMUR down to target_level
+                    # Step 6: Build region hierarchy starting from JAWA TIMUR down to target_level
                     region_paths = build_region_hierarchy(driver, region_group_id, target_level)
                     print(f"\n[+] Total target regions to scrape: {len(region_paths)}")
 
-                    # Step 8: Fetch respondents for each selected period and region path
                     if selected_periods and region_paths:
                         for period in selected_periods:
                             period_id = period.get("id")
@@ -791,23 +854,91 @@ def main():
                             print("\n" + "=" * 60)
                             print(f"[*] Processing Period: {period_name}")
                             print("=" * 60)
-                            period_respondents = []
-                            for r_idx, path in enumerate(region_paths):
-                                if r_idx > 0:
-                                    print(f"[*] Pausing {DEFAULT_DELAY}s before switching to next region...")
-                                    time.sleep(DEFAULT_DELAY)
-                                respondents = fetch_survey_respondents(driver, period_id, survey_id, region_path=path, delay=DEFAULT_DELAY)
-                                period_respondents.extend(respondents)
 
-                            print(f"\n[+] Period '{period_name}': Total {len(period_respondents)} respondent(s) collected across {len(region_paths)} region(s).")
+                            if action_mode == 1:
+                                print(f"[*] Mode 1 (New Download): Clearing existing data for Period '{period_name}'...")
+                                clear_period_data(survey_id, period_id)
 
-                            # Step 9: Fetch assignment details for each respondent
+                            progress = load_region_progress(survey_id, period_id)
+                            completed_region_keys = set(progress.get("completed_regions", []))
+
+                            # Dynamically evaluate if all target regions are completed
+                            all_target_keys = {" > ".join([r.get("fullCode", r.get("id", "")) for r in p]) for p in region_paths} if region_paths else set()
+                            all_regions_completed = all_target_keys.issubset(completed_region_keys) if all_target_keys else False
+
+                            # Load existing respondents from data.xlsx or cached JSONs if resuming
+                            existing_respondents_by_id = {}
+                            excel_path = os.path.join(RESULT_DIR, str(survey_id), str(period_id), OUTPUT_FILENAME)
+                            if os.path.exists(excel_path):
+                                try:
+                                    import pandas as pd
+                                    df_existing = pd.read_excel(excel_path)
+                                    id_col = "assignment_id" if "assignment_id" in df_existing.columns else ("id" if "id" in df_existing.columns else None)
+                                    if id_col:
+                                        records = df_existing.to_dict("records")
+                                        for row_dict in records:
+                                            rid = str(row_dict.get(id_col, ""))
+                                            if rid and rid != "nan":
+                                                row_dict["id"] = rid
+                                                existing_respondents_by_id[rid] = row_dict
+                                        print(f"[+] Loaded {len(existing_respondents_by_id)} existing respondent(s) from data.xlsx checkpoint.")
+                                except Exception as e:
+                                    print(f"[!] Warning reading existing Excel checkpoint: {e}")
+
+                            json_dir = os.path.join(RESULT_DIR, str(survey_id), str(period_id), "json")
+                            if os.path.exists(json_dir):
+                                for j_file in os.listdir(json_dir):
+                                    if j_file.endswith(".json"):
+                                        j_id = j_file[:-5]
+                                        if j_id not in existing_respondents_by_id:
+                                            existing_respondents_by_id[j_id] = {"id": j_id}
+
+                            period_respondents_map = dict(existing_respondents_by_id)
+
+                            if not all_regions_completed:
+                                for r_idx, path in enumerate(region_paths):
+                                    region_key = " > ".join([r.get("fullCode", r.get("id", "")) for r in path])
+                                    region_name_desc = " > ".join([r.get("name", "") for r in path])
+
+                                    # Check if region is already recorded in region_progress.json
+                                    if region_key in completed_region_keys:
+                                        print(f"[*] Region [{region_name_desc}] is present in region_progress.json. Skipping server fetch.")
+                                        continue
+
+                                    if r_idx > 0:
+                                        print(f"[*] Pausing {DEFAULT_DELAY}s before switching to next region...")
+                                        time.sleep(DEFAULT_DELAY)
+
+                                    # 1. Fetch all iteration of survey respondent for this specific region
+                                    respondents = fetch_survey_respondents(driver, period_id, survey_id, region_path=path, delay=DEFAULT_DELAY)
+                                    for item in respondents:
+                                        item_id = str(item.get("id", ""))
+                                        if item_id:
+                                            period_respondents_map[item_id] = item
+
+                                    # 2. Write/save respondent list to data.xlsx first
+                                    print(f"[*] Writing respondents for [{region_name_desc}] to data.xlsx...")
+                                    save_respondents_to_excel(list(period_respondents_map.values()), survey_id, period_id)
+
+                                    # 3. Only after data.xlsx save succeeds, mark region as complete in region_progress.json
+                                    completed_region_keys.add(region_key)
+                                    progress["completed_regions"] = list(completed_region_keys)
+                                    save_region_progress(survey_id, period_id, progress)
+                                    print(f"[+] Region [{region_name_desc}] completed and saved to region_progress.json.")
+
+                                if all_target_keys.issubset(completed_region_keys):
+                                    print(f"\n[+] All regions for Period '{period_name}' completed.")
+                            else:
+                                print(f"[*] All regions for Period '{period_name}' were completed. Skipping region network requests entirely.")
+
+                            period_respondents = list(period_respondents_map.values())
+
                             if period_respondents:
+                                print(f"[*] Processing detail JSONs for {len(period_respondents)} respondent(s)...")
                                 enrich_respondents_with_details(driver, period_respondents, survey_id, period_id, delay=DETAIL_DELAY)
+                                save_respondents_to_excel(period_respondents, survey_id, period_id)
 
-                            save_respondents_to_excel(period_respondents, survey_id, period_id)
-
-                            # Step 10: Extract dynamic respondent details to Excel
+                            # Step 8: Extract dynamic respondent details to Excel
                             extract_json_to_excel(survey_id, period_id)
 
         # Keep browser open for inspection if needed
@@ -821,3 +952,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
