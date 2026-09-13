@@ -1,17 +1,10 @@
 import getpass
 import json
 import os
-import socket
-import subprocess
 import time
 import requests
-from seleniumwire import webdriver
-from seleniumwire.utils import decode
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from camoufox.sync_api import Camoufox
+
 from extract_excel import extract_json_to_excel
 
 # ================= Configuration =================
@@ -30,121 +23,52 @@ ROOT_REGION_CODE = "35"                 # Root region code
 RESULT_DIR = "result"                   # Folder to save output Excel files
 OUTPUT_FILENAME = "data.xlsx"          # Output file name
 
-# Selectors (Full XPaths)
-INIT_LOGIN_BTN_SELECTOR = (By.XPATH, "/html/body/div[1]/div/div/div/div[1]/div/div/div/div/div/div[2]/a[1]/span")
-USERNAME_SELECTOR = (By.XPATH, "/html/body/div/div[2]/div/div/div/div/form/div[1]/input")
-PASSWORD_SELECTOR = (By.XPATH, "/html/body/div/div[2]/div/div/div/div/form/div[2]/input")
-LOGIN_BTN_SELECTOR = (By.XPATH, "/html/body/div/div[2]/div/div/div/div/form/div[4]/input[2]")
+# Selectors (Full XPaths, prefixed for Playwright's locator engine)
+INIT_LOGIN_BTN_SELECTOR = "xpath=/html/body/div[1]/div/div/div/div[1]/div/div/div/div/div/div[2]/a[1]/span"
+USERNAME_SELECTOR = "xpath=/html/body/div/div[2]/div/div/div/div/form/div[1]/input"
+PASSWORD_SELECTOR = "xpath=/html/body/div/div[2]/div/div/div/div/form/div[2]/input"
+LOGIN_BTN_SELECTOR = "xpath=/html/body/div/div[2]/div/div/div/div/form/div[4]/input[2]"
 
-OTP_INPUT_SELECTOR = (By.XPATH, "/html/body/div/div[2]/div/div/form[1]/div[1]/div[2]/input")
-OTP_SUBMIT_BTN_SELECTOR = (By.XPATH, "/html/body/div/div[2]/div/div/form[1]/div[2]/div[2]/input[2]")
+OTP_INPUT_SELECTOR = "xpath=/html/body/div/div[2]/div/div/form[1]/div[1]/div[2]/input"
+OTP_SUBMIT_BTN_SELECTOR = "xpath=/html/body/div/div[2]/div/div/form[1]/div[2]/div[2]/input[2]"
 
-# Request capture filter for surveys datatable
+# Request capture filter for surveys datatable (kept for reference; not used for network interception below)
 SURVEY_DATATABLE_KEYWORD = "survey/api/v1/surveys/datatable"
 
-# Remote debugging configuration
-DEBUGGER_PORT = 9222
-DEBUGGER_HOST = "127.0.0.1"
-DEBUGGER_ADDRESS = f"{DEBUGGER_HOST}:{DEBUGGER_PORT}"
-CHROME_PROFILE_DIR = r"C:\chrome_debug_profile"
-CHROME_EXECUTABLE_PATHS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-]
+# Camoufox persistent profile (equivalent to the old CHROME_PROFILE_DIR) so login/cookies can
+# persist across runs if you want that. Delete this folder to force a clean session.
+CAMOUFOX_PROFILE_DIR = os.path.join(os.getcwd(), "camoufox_profile")
+HEADLESS = False  # Set True once you've validated the flow; keep False while testing login/OTP
 # =================================================
 
 
-def is_port_in_use(port, host=DEBUGGER_HOST):
-    """Checks if the remote debugging port is already listening."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex((host, port)) == 0
-
-
-def launch_chrome_with_debugging():
-    """Finds Chrome and launches it with remote debugging enabled if not already running."""
-    if is_port_in_use(DEBUGGER_PORT):
-        print(f"[*] Chrome debugger already active on {DEBUGGER_ADDRESS}.")
-        return
-
-    chrome_exe = next((p for p in CHROME_EXECUTABLE_PATHS if os.path.exists(p)), None)
-    if not chrome_exe:
-        raise FileNotFoundError("Chrome executable not found in standard paths.")
-
-    cmd = [
-        chrome_exe,
-        f"--remote-debugging-port={DEBUGGER_PORT}",
-        f"--user-data-dir={CHROME_PROFILE_DIR}",
-    ]
-    print(f"[*] Launching Chrome: {' '.join(cmd)}")
-    subprocess.Popen(cmd)
-
-    # Wait until debugging port becomes available
-    for _ in range(15):
-        if is_port_in_use(DEBUGGER_PORT):
-            print("[+] Chrome debugging port is ready.")
-            return
-        time.sleep(1)
-
-    raise TimeoutError("Timed out waiting for Chrome to start with remote debugging.")
-
-
-def get_driver():
-    """Ensures Chrome is running with debugging, enables CDP Network interception, then connects to it."""
-    launch_chrome_with_debugging()
-
-    options = webdriver.ChromeOptions()
-    options.add_experimental_option("debuggerAddress", DEBUGGER_ADDRESS)
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options,
-    )
-
-    # Enable Chrome DevTools Protocol Network monitoring
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-    except Exception as e:
-        print(f"[!] Warning: Could not enable CDP network tracking: {e}")
-
-    return driver
-
-
-def login_and_verify_otp(driver, url, username, password, otp=""):
+def login_and_verify_otp(page, url, username, password, otp=""):
     """Navigates to the website, clicks login, enters credentials, and handles OTP if provided."""
     print(f"[*] Navigating to: {url}")
-    driver.get(url)
-
-    wait = WebDriverWait(driver, 60)
+    page.goto(url, timeout=60000)
 
     print("[*] Waiting for initial login button...")
-    init_login_btn = wait.until(EC.element_to_be_clickable(INIT_LOGIN_BTN_SELECTOR))
-    init_login_btn.click()
+    page.locator(INIT_LOGIN_BTN_SELECTOR).click(timeout=60000)
 
     print("[*] Waiting for username element...")
-    user_input = wait.until(EC.visibility_of_element_located(USERNAME_SELECTOR))
-    user_input.clear()
-    user_input.send_keys(username)
+    page.locator(USERNAME_SELECTOR).wait_for(state="visible", timeout=60000)
+    page.locator(USERNAME_SELECTOR).fill(username)
 
     print("[*] Entering password...")
-    pass_input = wait.until(EC.visibility_of_element_located(PASSWORD_SELECTOR))
-    pass_input.clear()
-    pass_input.send_keys(password)
+    page.locator(PASSWORD_SELECTOR).wait_for(state="visible", timeout=60000)
+    page.locator(PASSWORD_SELECTOR).fill(password)
 
     print("[*] Clicking login button...")
-    login_btn = wait.until(EC.element_to_be_clickable(LOGIN_BTN_SELECTOR))
-    login_btn.click()
+    page.locator(LOGIN_BTN_SELECTOR).click(timeout=60000)
 
     # If OTP was entered by the user in terminal
     if otp:
         print("[*] Waiting for OTP element...")
-        otp_input = wait.until(EC.visibility_of_element_located(OTP_INPUT_SELECTOR))
-        otp_input.clear()
-        otp_input.send_keys(otp)
+        page.locator(OTP_INPUT_SELECTOR).wait_for(state="visible", timeout=60000)
+        page.locator(OTP_INPUT_SELECTOR).fill(otp)
 
         print("[*] Submitting OTP...")
-        otp_submit_btn = wait.until(EC.element_to_be_clickable(OTP_SUBMIT_BTN_SELECTOR))
-        otp_submit_btn.click()
+        page.locator(OTP_SUBMIT_BTN_SELECTOR).click(timeout=60000)
         print("[*] OTP submitted.")
     else:
         print("[*] No OTP entered. Proceeding to home page...")
@@ -153,48 +77,52 @@ def login_and_verify_otp(driver, url, username, password, otp=""):
     time.sleep(5)
 
 
-def get_session_auth(driver, referer="https://fasih-sm.bps.go.id"):
+def get_session_auth(page, referer="https://fasih-sm.bps.go.id"):
     """Extracts session cookies and headers (including XSRF & Bearer token) from the active browser."""
-    selenium_cookies = driver.get_cookies()
-    cookies = {c["name"]: c["value"] for c in selenium_cookies}
+    context_cookies = page.context.cookies()
+    cookies = {c["name"]: c["value"] for c in context_cookies}
     xsrf_token = cookies.get("XSRF-TOKEN", "")
+
+    user_agent = page.evaluate("() => navigator.userAgent")
 
     headers = {
         "accept": "*/*",
         "accept-language": "en-US,en;q=0.9,id;q=0.8",
         "origin": "https://fasih-sm.bps.go.id",
         "referer": referer,
-        "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
+        # NOTE: Camoufox is Firefox-based. sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform are
+        # Chromium-only Client Hints — a real Firefox never sends them, so they're intentionally
+        # dropped here (sending them would be a fingerprint mismatch, defeating the point of Camoufox).
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-        "user-agent": driver.execute_script("return navigator.userAgent;"),
+        "user-agent": user_agent,
     }
 
     if xsrf_token:
         headers["x-xsrf-token"] = xsrf_token
 
     try:
-        token_val = driver.execute_script("""
-            for (let storage of [localStorage, sessionStorage]) {
-                for (let i = 0; i < storage.length; i++) {
-                    let key = storage.key(i);
-                    let val = storage.getItem(key);
-                    if (!val) continue;
-                    if (key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')) {
-                        try {
-                            let parsed = JSON.parse(val);
-                            if (typeof parsed === 'object' && parsed !== null) {
-                                val = parsed.token || parsed.accessToken || parsed.access_token || parsed.jwt || val;
-                            }
-                        } catch (e) {}
-                        if (typeof val === 'string' && val.length > 20) return val;
+        token_val = page.evaluate("""
+            () => {
+                for (let storage of [localStorage, sessionStorage]) {
+                    for (let i = 0; i < storage.length; i++) {
+                        let key = storage.key(i);
+                        let val = storage.getItem(key);
+                        if (!val) continue;
+                        if (key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')) {
+                            try {
+                                let parsed = JSON.parse(val);
+                                if (typeof parsed === 'object' && parsed !== null) {
+                                    val = parsed.token || parsed.accessToken || parsed.access_token || parsed.jwt || val;
+                                }
+                            } catch (e) {}
+                            if (typeof val === 'string' && val.length > 20) return val;
+                        }
                     }
                 }
+                return null;
             }
-            return null;
         """)
         if token_val:
             headers["authorization"] = token_val if token_val.startswith("Bearer ") else f"Bearer {token_val}"
@@ -204,14 +132,14 @@ def get_session_auth(driver, referer="https://fasih-sm.bps.go.id"):
     return cookies, headers
 
 
-def capture_survey_list(driver, survey_type="", timeout=30):
+def capture_survey_list(page, survey_type="", timeout=30):
     """Captures cookies from the logged-in browser and uses requests to fetch all surveys."""
     print("\n[*] Extracting session cookies and requesting all surveys...")
 
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            cookies, headers = get_session_auth(driver, referer="https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list")
+            cookies, headers = get_session_auth(page, referer="https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list")
             headers["content-type"] = "application/json"
 
             payload = {
@@ -274,14 +202,14 @@ def prompt_user_select_survey(surveys):
         print("[!] Invalid choice. Please enter a valid number.")
 
 
-def fetch_survey_periods(driver, survey_id, timeout=30):
+def fetch_survey_periods(page, survey_id, timeout=30):
     """Fetches survey periods for the selected survey using the authenticated session."""
     print(f"\n[*] Fetching survey periods for survey ID: {survey_id}...")
 
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            cookies, headers = get_session_auth(driver, referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}")
+            cookies, headers = get_session_auth(page, referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}")
 
             resp = requests.get(
                 "https://fasih-sm.bps.go.id/app/api/survey/api/v1/survey-periods/my",
@@ -433,14 +361,13 @@ def clear_period_data(survey_id, period_id):
             print(f"[!] Warning: Could not delete {progress_file}: {e}")
 
 
-
-def fetch_survey_metadata(driver, survey_id, timeout=30):
+def fetch_survey_metadata(page, survey_id, timeout=30):
     """Fetches survey details to obtain regionGroupId."""
     print(f"\n[*] Fetching metadata for survey ID: {survey_id}...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            cookies, headers = get_session_auth(driver, referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}")
+            cookies, headers = get_session_auth(page, referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}")
             resp = requests.get(
                 f"https://fasih-sm.bps.go.id/app/api/survey/api/v1/surveys/{survey_id}",
                 cookies=cookies,
@@ -469,13 +396,13 @@ def fetch_survey_metadata(driver, survey_id, timeout=30):
     return None, {}
 
 
-def fetch_region_metadata(driver, region_group_id, timeout=30):
+def fetch_region_metadata(page, region_group_id, timeout=30):
     """Fetches region metadata levels for the given region group ID."""
     print(f"\n[*] Fetching region metadata for Group ID: {region_group_id}...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            cookies, headers = get_session_auth(driver)
+            cookies, headers = get_session_auth(page)
             resp = requests.get(
                 "https://fasih-sm.bps.go.id/app/api/region/api/v1/region-metadata",
                 params={"id": region_group_id},
@@ -528,9 +455,9 @@ def prompt_user_select_region_level(region_metadata):
         print(f"[!] Invalid choice. Please enter a number between 1 and {len(levels)}.")
 
 
-def fetch_regions_for_level(driver, group_id, level_num, parent_full_code=None):
+def fetch_regions_for_level(page, group_id, level_num, parent_full_code=None):
     """Fetches regions at a specific level."""
-    cookies, headers = get_session_auth(driver)
+    cookies, headers = get_session_auth(page)
     url = f"https://fasih-sm.bps.go.id/app/api/region/api/v1/region/level{level_num}"
     params = {"groupId": group_id}
     if level_num > 1 and parent_full_code:
@@ -547,10 +474,10 @@ def fetch_regions_for_level(driver, group_id, level_num, parent_full_code=None):
     return []
 
 
-def build_region_hierarchy(driver, group_id, target_level):
+def build_region_hierarchy(page, group_id, target_level):
     """Traverses regions starting from root region down to target_level and returns list of paths."""
     print(f"\n[*] Fetching Level 1 regions...")
-    level1_regions = fetch_regions_for_level(driver, group_id, 1)
+    level1_regions = fetch_regions_for_level(page, group_id, 1)
 
     # Locate root region
     jt_region = next(
@@ -577,7 +504,7 @@ def build_region_hierarchy(driver, group_id, target_level):
         next_paths = []
         for path in current_paths:
             parent = path[-1]
-            children = fetch_regions_for_level(driver, group_id, lvl, parent_full_code=parent.get("fullCode"))
+            children = fetch_regions_for_level(page, group_id, lvl, parent_full_code=parent.get("fullCode"))
             for child in children:
                 next_paths.append(path + [child])
         current_paths = next_paths
@@ -586,13 +513,13 @@ def build_region_hierarchy(driver, group_id, target_level):
     return current_paths
 
 
-def fetch_survey_respondents(driver, survey_period_id, survey_id, region_path=None, delay=DEFAULT_DELAY):
+def fetch_survey_respondents(page, survey_period_id, survey_id, region_path=None, delay=DEFAULT_DELAY):
     """Fetches all respondents for a survey period and region path by paginating through results."""
     region_desc = " > ".join([r.get("name", "") for r in region_path]) if region_path else f"Period {survey_period_id}"
     print(f"\n[*] Fetching respondents for: {region_desc}...")
 
     cookies, headers = get_session_auth(
-        driver,
+        page,
         referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}/{survey_period_id}/data?page=1&perPage=100",
     )
     headers["content-type"] = "application/json"
@@ -677,10 +604,10 @@ def fetch_survey_respondents(driver, survey_period_id, survey_id, region_path=No
     return all_respondents
 
 
-def fetch_assignment_detail(driver, assignment_id, period_id, timeout=15):
+def fetch_assignment_detail(page, assignment_id, period_id, timeout=15):
     """Fetches full assignment details for a given assignment ID."""
     cookies, headers = get_session_auth(
-        driver,
+        page,
         referer=f"https://fasih-sm.bps.go.id/app/assignment/{period_id}/{assignment_id}",
     )
     url = "https://fasih-sm.bps.go.id/app/api/assignment-general/api/assignment/get-by-assignment-id"
@@ -705,7 +632,7 @@ def fetch_assignment_detail(driver, assignment_id, period_id, timeout=15):
     return {}
 
 
-def enrich_respondents_with_details(driver, respondents, survey_id, period_id, delay=DETAIL_DELAY):
+def enrich_respondents_with_details(page, respondents, survey_id, period_id, delay=DETAIL_DELAY):
     """Fetches details for each respondent, caches to result/{survey_id}/{period_id}/json/{id}.json, and loads existing JSON if present."""
     if not respondents:
         return respondents
@@ -734,7 +661,7 @@ def enrich_respondents_with_details(driver, respondents, survey_id, period_id, d
                 print(f"[!] Error reading cached JSON for {assignment_id}: {e}. Re-fetching...")
 
         print(f"[*] [{idx}/{len(respondents)}] Fetching detail for assignment ID: {assignment_id}...")
-        detail = fetch_assignment_detail(driver, assignment_id, period_id)
+        detail = fetch_assignment_detail(page, assignment_id, period_id)
         if detail:
             item["assignment_detail"] = detail
             item["detail_data_raw"] = detail.get("data")
@@ -809,147 +736,158 @@ def main():
     # Mode option asked right after credential prompt
     action_mode = prompt_user_select_mode()
 
-    driver = get_driver()
-    try:
-        # Step 1: Open website, perform login flow, submit OTP if provided
-        login_and_verify_otp(driver, TARGET_URL, username, password, otp=otp)
+    os.makedirs(CAMOUFOX_PROFILE_DIR, exist_ok=True)
 
-        # Step 2: Capture all surveys (surveyType='')
-        surveys = capture_survey_list(driver)
+    # Camoufox launches its own patched Firefox (no attaching to an existing debug-port Chrome
+    # like the old seleniumwire/CDP setup). persistent_context=True + user_data_dir keeps the
+    # profile (and login session, if you want to reuse it) between runs.
+    with Camoufox(
+        headless=HEADLESS,
+        persistent_context=True,
+        user_data_dir=CAMOUFOX_PROFILE_DIR,
+        humanize=True,
+    ) as context:
+        page = context.pages[0] if context.pages else context.new_page()
 
-        # Step 3: Present surveys to user to select
-        selected_survey = prompt_user_select_survey(surveys)
+        try:
+            # Step 1: Open website, perform login flow, submit OTP if provided
+            login_and_verify_otp(page, TARGET_URL, username, password, otp=otp)
 
-        # Step 4: Fetch and select survey period(s)
-        if selected_survey and "id" in selected_survey:
-            survey_id = selected_survey["id"]
-            periods = fetch_survey_periods(driver, survey_id)
-            selected_periods = prompt_user_select_periods(periods)
+            # Step 2: Capture all surveys (surveyType='')
+            surveys = capture_survey_list(page)
 
-            if action_mode == 3:
-                # Mode 3: Extract only from existing downloaded JSON files
-                for period in selected_periods:
-                    period_id = period.get("id")
-                    period_name = period.get("name", "N/A")
-                    print("\n" + "=" * 60)
-                    print(f"[*] Extracting Excel for Period: {period_name}")
-                    print("=" * 60)
-                    extract_json_to_excel(survey_id, period_id)
-            else:
-                # Modes 1 & 2: Downloading data
-                # Step 5: Fetch region metadata and prompt target level
-                region_group_id, _ = fetch_survey_metadata(driver, survey_id)
-                if region_group_id:
-                    region_metadata = fetch_region_metadata(driver, region_group_id)
-                    target_level = prompt_user_select_region_level(region_metadata)
+            # Step 3: Present surveys to user to select
+            selected_survey = prompt_user_select_survey(surveys)
 
-                    # Step 6: Build region hierarchy starting from JAWA TIMUR down to target_level
-                    region_paths = build_region_hierarchy(driver, region_group_id, target_level)
-                    print(f"\n[+] Total target regions to scrape: {len(region_paths)}")
+            # Step 4: Fetch and select survey period(s)
+            if selected_survey and "id" in selected_survey:
+                survey_id = selected_survey["id"]
+                periods = fetch_survey_periods(page, survey_id)
+                selected_periods = prompt_user_select_periods(periods)
 
-                    if selected_periods and region_paths:
-                        for period in selected_periods:
-                            period_id = period.get("id")
-                            period_name = period.get("name", "N/A")
-                            print("\n" + "=" * 60)
-                            print(f"[*] Processing Period: {period_name}")
-                            print("=" * 60)
+                if action_mode == 3:
+                    # Mode 3: Extract only from existing downloaded JSON files
+                    for period in selected_periods:
+                        period_id = period.get("id")
+                        period_name = period.get("name", "N/A")
+                        print("\n" + "=" * 60)
+                        print(f"[*] Extracting Excel for Period: {period_name}")
+                        print("=" * 60)
+                        extract_json_to_excel(survey_id, period_id)
+                else:
+                    # Modes 1 & 2: Downloading data
+                    # Step 5: Fetch region metadata and prompt target level
+                    region_group_id, _ = fetch_survey_metadata(page, survey_id)
+                    if region_group_id:
+                        region_metadata = fetch_region_metadata(page, region_group_id)
+                        target_level = prompt_user_select_region_level(region_metadata)
 
-                            if action_mode == 1:
-                                print(f"[*] Mode 1 (New Download): Clearing existing data for Period '{period_name}'...")
-                                clear_period_data(survey_id, period_id)
+                        # Step 6: Build region hierarchy starting from JAWA TIMUR down to target_level
+                        region_paths = build_region_hierarchy(page, region_group_id, target_level)
+                        print(f"\n[+] Total target regions to scrape: {len(region_paths)}")
 
-                            progress = load_region_progress(survey_id, period_id)
-                            completed_region_keys = set(progress.get("completed_regions", []))
+                        if selected_periods and region_paths:
+                            for period in selected_periods:
+                                period_id = period.get("id")
+                                period_name = period.get("name", "N/A")
+                                print("\n" + "=" * 60)
+                                print(f"[*] Processing Period: {period_name}")
+                                print("=" * 60)
 
-                            # Dynamically evaluate if all target regions are completed
-                            all_target_keys = {" > ".join([r.get("fullCode", r.get("id", "")) for r in p]) for p in region_paths} if region_paths else set()
-                            all_regions_completed = all_target_keys.issubset(completed_region_keys) if all_target_keys else False
+                                if action_mode == 1:
+                                    print(f"[*] Mode 1 (New Download): Clearing existing data for Period '{period_name}'...")
+                                    clear_period_data(survey_id, period_id)
 
-                            # Load existing respondents from data.xlsx or cached JSONs if resuming
-                            existing_respondents_by_id = {}
-                            excel_path = os.path.join(RESULT_DIR, str(survey_id), str(period_id), OUTPUT_FILENAME)
-                            if os.path.exists(excel_path):
-                                try:
-                                    import pandas as pd
-                                    df_existing = pd.read_excel(excel_path)
-                                    id_col = "assignment_id" if "assignment_id" in df_existing.columns else ("id" if "id" in df_existing.columns else None)
-                                    if id_col:
-                                        records = df_existing.to_dict("records")
-                                        for row_dict in records:
-                                            rid = str(row_dict.get(id_col, ""))
-                                            if rid and rid != "nan":
-                                                row_dict["id"] = rid
-                                                existing_respondents_by_id[rid] = row_dict
-                                        print(f"[+] Loaded {len(existing_respondents_by_id)} existing respondent(s) from data.xlsx checkpoint.")
-                                except Exception as e:
-                                    print(f"[!] Warning reading existing Excel checkpoint: {e}")
+                                progress = load_region_progress(survey_id, period_id)
+                                completed_region_keys = set(progress.get("completed_regions", []))
 
-                            json_dir = os.path.join(RESULT_DIR, str(survey_id), str(period_id), "json")
-                            if os.path.exists(json_dir):
-                                for j_file in os.listdir(json_dir):
-                                    if j_file.endswith(".json"):
-                                        j_id = j_file[:-5]
-                                        if j_id not in existing_respondents_by_id:
-                                            existing_respondents_by_id[j_id] = {"id": j_id}
+                                # Dynamically evaluate if all target regions are completed
+                                all_target_keys = {" > ".join([r.get("fullCode", r.get("id", "")) for r in p]) for p in region_paths} if region_paths else set()
+                                all_regions_completed = all_target_keys.issubset(completed_region_keys) if all_target_keys else False
 
-                            period_respondents_map = dict(existing_respondents_by_id)
+                                # Load existing respondents from data.xlsx or cached JSONs if resuming
+                                existing_respondents_by_id = {}
+                                excel_path = os.path.join(RESULT_DIR, str(survey_id), str(period_id), OUTPUT_FILENAME)
+                                if os.path.exists(excel_path):
+                                    try:
+                                        import pandas as pd
+                                        df_existing = pd.read_excel(excel_path)
+                                        id_col = "assignment_id" if "assignment_id" in df_existing.columns else ("id" if "id" in df_existing.columns else None)
+                                        if id_col:
+                                            records = df_existing.to_dict("records")
+                                            for row_dict in records:
+                                                rid = str(row_dict.get(id_col, ""))
+                                                if rid and rid != "nan":
+                                                    row_dict["id"] = rid
+                                                    existing_respondents_by_id[rid] = row_dict
+                                            print(f"[+] Loaded {len(existing_respondents_by_id)} existing respondent(s) from data.xlsx checkpoint.")
+                                    except Exception as e:
+                                        print(f"[!] Warning reading existing Excel checkpoint: {e}")
 
-                            if not all_regions_completed:
-                                for r_idx, path in enumerate(region_paths):
-                                    region_key = " > ".join([r.get("fullCode", r.get("id", "")) for r in path])
-                                    region_name_desc = " > ".join([r.get("name", "") for r in path])
+                                json_dir = os.path.join(RESULT_DIR, str(survey_id), str(period_id), "json")
+                                if os.path.exists(json_dir):
+                                    for j_file in os.listdir(json_dir):
+                                        if j_file.endswith(".json"):
+                                            j_id = j_file[:-5]
+                                            if j_id not in existing_respondents_by_id:
+                                                existing_respondents_by_id[j_id] = {"id": j_id}
 
-                                    # Check if region is already recorded in region_progress.json
-                                    if region_key in completed_region_keys:
-                                        print(f"[*] Region [{region_name_desc}] is present in region_progress.json. Skipping server fetch.")
-                                        continue
+                                period_respondents_map = dict(existing_respondents_by_id)
 
-                                    if r_idx > 0:
-                                        print(f"[*] Pausing {DEFAULT_DELAY}s before switching to next region...")
-                                        time.sleep(DEFAULT_DELAY)
+                                if not all_regions_completed:
+                                    for r_idx, path in enumerate(region_paths):
+                                        region_key = " > ".join([r.get("fullCode", r.get("id", "")) for r in path])
+                                        region_name_desc = " > ".join([r.get("name", "") for r in path])
 
-                                    # 1. Fetch all iteration of survey respondent for this specific region
-                                    respondents = fetch_survey_respondents(driver, period_id, survey_id, region_path=path, delay=DEFAULT_DELAY)
-                                    for item in respondents:
-                                        item_id = str(item.get("id", ""))
-                                        if item_id:
-                                            period_respondents_map[item_id] = item
+                                        # Check if region is already recorded in region_progress.json
+                                        if region_key in completed_region_keys:
+                                            print(f"[*] Region [{region_name_desc}] is present in region_progress.json. Skipping server fetch.")
+                                            continue
 
-                                    # 2. Write/save respondent list to data.xlsx first
-                                    print(f"[*] Writing respondents for [{region_name_desc}] to data.xlsx...")
-                                    save_respondents_to_excel(list(period_respondents_map.values()), survey_id, period_id)
+                                        if r_idx > 0:
+                                            print(f"[*] Pausing {DEFAULT_DELAY}s before switching to next region...")
+                                            time.sleep(DEFAULT_DELAY)
 
-                                    # 3. Only after data.xlsx save succeeds, mark region as complete in region_progress.json
-                                    completed_region_keys.add(region_key)
-                                    progress["completed_regions"] = list(completed_region_keys)
-                                    save_region_progress(survey_id, period_id, progress)
-                                    print(f"[+] Region [{region_name_desc}] completed and saved to region_progress.json.")
+                                        # 1. Fetch all iteration of survey respondent for this specific region
+                                        respondents = fetch_survey_respondents(page, period_id, survey_id, region_path=path, delay=DEFAULT_DELAY)
+                                        for item in respondents:
+                                            item_id = str(item.get("id", ""))
+                                            if item_id:
+                                                period_respondents_map[item_id] = item
 
-                                if all_target_keys.issubset(completed_region_keys):
-                                    print(f"\n[+] All regions for Period '{period_name}' completed.")
-                            else:
-                                print(f"[*] All regions for Period '{period_name}' were completed. Skipping region network requests entirely.")
+                                        # 2. Write/save respondent list to data.xlsx first
+                                        print(f"[*] Writing respondents for [{region_name_desc}] to data.xlsx...")
+                                        save_respondents_to_excel(list(period_respondents_map.values()), survey_id, period_id)
 
-                            period_respondents = list(period_respondents_map.values())
+                                        # 3. Only after data.xlsx save succeeds, mark region as complete in region_progress.json
+                                        completed_region_keys.add(region_key)
+                                        progress["completed_regions"] = list(completed_region_keys)
+                                        save_region_progress(survey_id, period_id, progress)
+                                        print(f"[+] Region [{region_name_desc}] completed and saved to region_progress.json.")
 
-                            if period_respondents:
-                                print(f"[*] Processing detail JSONs for {len(period_respondents)} respondent(s)...")
-                                enrich_respondents_with_details(driver, period_respondents, survey_id, period_id, delay=DETAIL_DELAY)
-                                save_respondents_to_excel(period_respondents, survey_id, period_id)
+                                    if all_target_keys.issubset(completed_region_keys):
+                                        print(f"\n[+] All regions for Period '{period_name}' completed.")
+                                else:
+                                    print(f"[*] All regions for Period '{period_name}' were completed. Skipping region network requests entirely.")
 
-                            # Step 8: Extract dynamic respondent details to Excel
-                            extract_json_to_excel(survey_id, period_id)
+                                period_respondents = list(period_respondents_map.values())
 
-        # Keep browser open for inspection if needed
-        input("\nPress Enter to close browser...")
+                                if period_respondents:
+                                    print(f"[*] Processing detail JSONs for {len(period_respondents)} respondent(s)...")
+                                    enrich_respondents_with_details(page, period_respondents, survey_id, period_id, delay=DETAIL_DELAY)
+                                    save_respondents_to_excel(period_respondents, survey_id, period_id)
 
-    except Exception as e:
-        print(f"[!] Error occurred: {e}")
-    finally:
-        driver.quit()
+                                # Step 8: Extract dynamic respondent details to Excel
+                                extract_json_to_excel(survey_id, period_id)
+
+            # Keep browser open for inspection if needed
+            input("\nPress Enter to close browser...")
+
+        except Exception as e:
+            print(f"[!] Error occurred: {e}")
+        # No explicit driver.quit() needed — the `with Camoufox(...)` block closes the
+        # browser/context automatically on exit, including on exception.
 
 
 if __name__ == "__main__":
     main()
-
