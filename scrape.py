@@ -19,6 +19,13 @@ ENABLE_USER_PROMPT_REGION_LEVEL = True  # Set True to prompt user for target lev
 ROOT_REGION_NAME = "JAWA TIMUR"         # Root region name to start building hierarchy
 ROOT_REGION_CODE = "35"                 # Root region code
 
+# Set specific full area codes (province+regency+subdistrict+village+sls+sub-sls, 16 digits)
+# to scrape only those exact areas instead of traversing the whole region hierarchy.
+# e.g. "3578030004004401" -> 35 (province) 78 (regency) 030 (subdistrict) 004 (village) 0044 (sls) 01 (sub-sls)
+# Leave this list empty ([]) to fall back to the interactive region-level selection.
+TARGET_AREA_CODES = ["3578030004004401", "3578030004004402"]
+AREA_CODE_LEVEL_LENGTHS = [2, 2, 3, 3, 4, 2]  # digit length of each level segment above, in order
+
 # Output configuration
 RESULT_DIR = "result"                   # Folder to save output Excel files
 OUTPUT_FILENAME = "data.xlsx"          # Output file name
@@ -513,6 +520,38 @@ def build_region_hierarchy(page, group_id, target_level):
     return current_paths
 
 
+def build_region_hierarchy_from_codes(page, group_id, area_codes):
+    """Resolves exact region paths for the given full area codes, fetching only the
+    matching region at each level instead of traversing the entire hierarchy."""
+    cumulative_lengths = []
+    total = 0
+    for length in AREA_CODE_LEVEL_LENGTHS:
+        total += length
+        cumulative_lengths.append(total)
+
+    region_paths = []
+    for code in area_codes:
+        print(f"\n[*] Resolving region path for area code: {code}")
+        path = []
+        parent_full_code = None
+        for lvl, cum_len in enumerate(cumulative_lengths, start=1):
+            target_full_code = code[:cum_len]
+            regions = fetch_regions_for_level(page, group_id, lvl, parent_full_code=parent_full_code)
+            match = next((r for r in regions if r.get("fullCode") == target_full_code), None)
+            if not match:
+                print(f"[!] Could not find region with fullCode '{target_full_code}' at level {lvl}. Skipping area code {code}.")
+                path = []
+                break
+            print(f"    Level {lvl}: {match.get('name')} (fullCode: {match.get('fullCode')})")
+            path.append(match)
+            parent_full_code = match.get("fullCode")
+
+        if path:
+            region_paths.append(path)
+
+    return region_paths
+
+
 def fetch_survey_respondents(page, survey_period_id, survey_id, region_path=None, delay=DEFAULT_DELAY):
     """Fetches all respondents for a survey period and region path by paginating through results."""
     region_desc = " > ".join([r.get("name", "") for r in region_path]) if region_path else f"Period {survey_period_id}"
@@ -779,11 +818,16 @@ def main():
                     # Step 5: Fetch region metadata and prompt target level
                     region_group_id, _ = fetch_survey_metadata(page, survey_id)
                     if region_group_id:
-                        region_metadata = fetch_region_metadata(page, region_group_id)
-                        target_level = prompt_user_select_region_level(region_metadata)
+                        if TARGET_AREA_CODES:
+                            # Step 6: Resolve only the specific area codes requested
+                            print(f"\n[*] TARGET_AREA_CODES is set. Filtering to {len(TARGET_AREA_CODES)} specific area(s) instead of the full hierarchy.")
+                            region_paths = build_region_hierarchy_from_codes(page, region_group_id, TARGET_AREA_CODES)
+                        else:
+                            region_metadata = fetch_region_metadata(page, region_group_id)
+                            target_level = prompt_user_select_region_level(region_metadata)
 
-                        # Step 6: Build region hierarchy starting from JAWA TIMUR down to target_level
-                        region_paths = build_region_hierarchy(page, region_group_id, target_level)
+                            # Step 6: Build region hierarchy starting from JAWA TIMUR down to target_level
+                            region_paths = build_region_hierarchy(page, region_group_id, target_level)
                         print(f"\n[+] Total target regions to scrape: {len(region_paths)}")
 
                         if selected_periods and region_paths:
