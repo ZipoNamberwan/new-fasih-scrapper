@@ -1,3 +1,4 @@
+import csv
 import getpass
 import json
 import os
@@ -481,6 +482,72 @@ def fetch_regions_for_level(page, group_id, level_num, parent_full_code=None):
     return []
 
 
+def fetch_survey_template_file(page, template_id, template_version, validation_version, referer, timeout=15):
+    """Fetches a survey template's JSON definition file from the designer API."""
+    cookies, headers = get_session_auth(page, referer=referer)
+    url = f"https://fasih-sm.bps.go.id/app/api/designer/api/template/file/{template_id}"
+    params = {"templateVersion": template_version, "validationVersion": validation_version}
+
+    try:
+        resp = requests.get(url, params=params, cookies=cookies, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            print(f"[!] Template file request for {template_id} returned status code: {resp.status_code}")
+    except Exception as e:
+        print(f"[!] Error fetching template file {template_id}: {e}")
+    return None
+
+
+def save_survey_templates(page, survey_data, survey_id, period_id):
+    """Fetches each surveyTemplates entry's JSON file and saves it to result/{survey_id}/{period_id}/template/."""
+    templates = survey_data.get("surveyTemplates", []) if survey_data else []
+    if not templates:
+        print("[!] No surveyTemplates found in survey detail response.")
+        return
+
+    template_dir = os.path.join(RESULT_DIR, str(survey_id), str(period_id), "template")
+    os.makedirs(template_dir, exist_ok=True)
+
+    csv_path = os.path.join(template_dir, "surveyTemplates.csv")
+    try:
+        fieldnames = sorted({key for tmpl in templates for key in tmpl.keys()})
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(templates)
+        print(f"[+] Saved surveyTemplates CSV: {csv_path}")
+    except Exception as e:
+        print(f"[!] Error saving surveyTemplates CSV {csv_path}: {e}")
+
+    print(f"\n[*] Fetching {len(templates)} survey template file(s)...")
+    for tmpl in templates:
+        template_id = tmpl.get("templateId")
+        template_version = tmpl.get("templateVersion")
+        validation_version = tmpl.get("validationVersion")
+        mode = tmpl.get("mode", "template")
+        if not template_id:
+            continue
+
+        print(f"[*] Fetching template for mode '{mode}' (templateId: {template_id})...")
+        template_data = fetch_survey_template_file(
+            page,
+            template_id,
+            template_version,
+            validation_version,
+            referer=f"https://fasih-sm.bps.go.id/app/surveys/{survey_id}/{period_id}",
+        )
+
+        if template_data is not None:
+            template_path = os.path.join(template_dir, f"{template_id}.json")
+            try:
+                with open(template_path, "w", encoding="utf-8") as f:
+                    json.dump(template_data, f, ensure_ascii=False, indent=2)
+                print(f"[+] Saved template file: {template_path}")
+            except Exception as e:
+                print(f"[!] Error saving template file {template_path}: {e}")
+
+
 def build_region_hierarchy(page, group_id, target_level):
     """Traverses regions starting from root region down to target_level and returns list of paths."""
     print(f"\n[*] Fetching Level 1 regions...")
@@ -815,8 +882,8 @@ def main():
                         extract_json_to_excel(survey_id, period_id)
                 else:
                     # Modes 1 & 2: Downloading data
-                    # Step 5: Fetch region metadata and prompt target level
-                    region_group_id, _ = fetch_survey_metadata(page, survey_id)
+                    # Step 5: Fetch survey detail (needed for both region metadata and template files)
+                    region_group_id, survey_data = fetch_survey_metadata(page, survey_id)
                     if region_group_id:
                         if TARGET_AREA_CODES:
                             # Step 6: Resolve only the specific area codes requested
@@ -837,6 +904,9 @@ def main():
                                 print("\n" + "=" * 60)
                                 print(f"[*] Processing Period: {period_name}")
                                 print("=" * 60)
+
+                                # Step 5b: Save each survey template's JSON file before fetching regions
+                                save_survey_templates(page, survey_data, survey_id, period_id)
 
                                 if action_mode == 1:
                                     print(f"[*] Mode 1 (New Download): Clearing existing data for Period '{period_name}'...")
