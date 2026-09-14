@@ -728,14 +728,6 @@ def main():
     print("      FASIH SCRAPER - LOGIN & CAPTURE       ")
     print("=" * 50)
 
-    # Prompt user in terminal for credentials
-    username = input("Enter Username / Email            : ").strip()
-    password = getpass.getpass("Enter Password                    : ")
-    otp = input("Enter OTP (leave blank if none)      : ").strip()
-
-    # Mode option asked right after credential prompt
-    action_mode = prompt_user_select_mode()
-
     os.makedirs(CAMOUFOX_PROFILE_DIR, exist_ok=True)
 
     # Camoufox launches its own patched Firefox (no attaching to an existing debug-port Chrome
@@ -750,8 +742,16 @@ def main():
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
+            # Prompt user in terminal for credentials (after the browser is already open)
+            username = input("Enter Username / Email            : ").strip()
+            password = getpass.getpass("Enter Password                    : ")
+            otp = input("Enter OTP (leave blank if none)      : ").strip()
+
             # Step 1: Open website, perform login flow, submit OTP if provided
             login_and_verify_otp(page, TARGET_URL, username, password, otp=otp)
+
+            # Mode option asked only after the login navigation/flow succeeds
+            action_mode = prompt_user_select_mode()
 
             # Step 2: Capture all surveys (surveyType='')
             surveys = capture_survey_list(page)
