@@ -1,0 +1,4 @@
+requests
+camoufox
+pandas
+openpyxl
